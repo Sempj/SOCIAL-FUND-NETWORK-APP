@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Social Funders Network</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px; }
+        .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; }
+        button { padding: 10px 15px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; background: #4CAF50; color: white; }
+        button.secondary { background: #2196F3; }
+        button.danger { background: #f44336; }
+        input, textarea { width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ddd; border-radius: 5px; }
+        .card { background: #f9f9f9; border: 1px solid #eee; border-radius: 8px; padding: 15px; margin: 10px 0; }
+        .hidden { display: none; }
+        .tabs { display: flex; gap: 10px; margin: 20px 0; }
+        .tab { flex: 1; padding: 10px; background: #ddd; text-align: center; cursor: pointer; border-radius: 5px; }
+        .tab.active { background: #4CAF50; color: white; }
+        .wallet-info { background: #e3f2fd; padding: 10px; border-radius: 5px; margin-bottom: 20px; word-break: break-all; }
+        .post-actions { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 10px; }
+        .comment { margin-left: 20px; padding: 5px; border-left: 2px solid #ccc; }
+        .progress { width: 100%; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+        .progress-bar { height: 100%; background: #4CAF50; }
+        .share-button { background: #ff9800; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Social Funders Network</h1>
+
+        <!-- Wallet Connection -->
+        <div id="walletSection">
+            <button id="connectBtn">Connect Wallet</button>
+            <div id="walletInfo" class="wallet-info hidden"></div>
+        </div>
+
+        <!-- Main App (visible after connection) -->
+        <div id="app" class="hidden">
+            <div class="tabs">
+                <div class="tab active" data-tab="feed">Feed</div>
+                <div class="tab" data-tab="campaigns">Campaigns</div>
+                <div class="tab" data-tab="admin" id="adminTab">Admin</div>
+            </div>
+
+            <!-- Feed Tab -->
+            <div id="feedTab" class="tab-content">
+                <h3>Create Post</h3>
+                <textarea id="postContent" placeholder="What's happening?"></textarea>
+                <input id="postImage" placeholder="Image URL (optional)">
+                <button id="createPostBtn">Post</button>
+
+                <h3>Feed</h3>
+                <div id="postsList"></div>
+            </div>
+
+            <!-- Campaigns Tab -->
+            <div id="campaignsTab" class="tab-content hidden">
+                <h3>Start a Campaign</h3>
+                <input id="campaignTitle" placeholder="Title">
+                <textarea id="campaignDescription" placeholder="Description"></textarea>
+                <input id="campaignGoal" type="number" placeholder="Goal (FUND)">
+                <input id="campaignDeadline" type="date" placeholder="Deadline">
+                <button id="createCampaignBtn">Create Campaign</button>
+
+                <h3>Active Campaigns</h3>
+                <div id="campaignsList"></div>
+            </div>
+
+            <!-- Admin Tab -->
+            <div id="adminTab" class="tab-content hidden">
+                <h3>Manage Posts</h3>
+                <div id="adminPostsList"></div>
+                <h3>Manage Campaigns</h3>
+                <div id="adminCampaignsList"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Load ethers -->
+    <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+
+    <script>
+        // Configuration
+        const FUND_ADDRESS = '0x06396aa215ef3fa2945c535be9c2ddc4e80a9b07';
+        const FUND_ABI = [
+            'function transfer(address to, uint256 amount) returns (bool)',
+            'function decimals() view returns (uint8)',
+            'function balanceOf(address account) view returns (uint256)'
+        ];
+
+        // IMPORTANT: Replace this with your own wallet address to become admin
+        const ADMIN_WALLETS = ['0xYourWalletAddressHere']; // <-- CHANGE THIS
+
+        // Global variables
+        let provider, signer, fundContract, userAddress, isAdmin = false;
+        let posts = [], campaigns = [];
+
+        // Load data from localStorage
+        function loadData() {
+            const savedPosts = localStorage.getItem('sfn_posts');
+            const savedCampaigns = localStorage.getItem('sfn_campaigns');
+            posts = savedPosts ? JSON.parse(savedPosts) : [];
+            campaigns = savedCampaigns ? JSON.parse(savedCampaigns) : [];
+        }
+        function saveData() {
+            localStorage.setItem('sfn_posts', JSON.stringify(posts));
+            localStorage.setItem('sfn_campaigns', JSON.stringify(campaigns));
+        }
+
+        // Initialize
+        loadData();
+
+        // DOM elements
+        const connectBtn = document.getElementById('connectBtn');
+        const walletInfo = document.getElementById('walletInfo');
+        const appDiv = document.getElementById('app');
+        const tabs = document.querySelectorAll('.tab');
+        const adminTab = document.getElementById('adminTab');
+
+        // Wallet connection
+        connectBtn.addEventListener('click', async () => {
+            if (!window.ethereum) {
+                alert('No wallet detected. Please open in Trust Wallet or MetaMask browser.');
+                return;
+            }
+            try {
+                await window.ethereum.request({ method: 'eth_requestAccounts' });
+                provider = new ethers.providers.Web3Provider(window.ethereum);
+                signer = provider.getSigner();
+                userAddress = await signer.getAddress();
+
+                // Check network
+                const network = await provider.getNetwork();
+                if (network.chainId !== 8453) {
+                    alert('Please switch to Base network.');
+                    return;
+                }
+
+                // Initialize contract
+                fundContract = new ethers.Contract(FUND_ADDRESS, FUND_ABI, signer);
+                const decimals = await fundContract.decimals();
+                const balance = await fundContract.balanceOf(userAddress);
+
+                // Display wallet info
+                walletInfo.innerHTML = `
+                    <strong>Connected:</strong> ${userAddress}<br>
+                    <strong>FUND Balance:</strong> ${ethers.utils.formatUnits(balance, decimals)}
+                `;
+                walletInfo.classList.remove('hidden');
+                connectBtn.style.display = 'none';
+                appDiv.classList.remove('hidden');
+
+                // Check if admin
+                isAdmin = ADMIN_WALLETS.includes(userAddress.toLowerCase(0x8F1BE8D1331f6968680bC141339bb246f68aD899);
+                if (!isAdmin) adminTab.style.display = 'none';
+
+                // Refresh UI
+                renderFeed();
+                renderCampaigns();
+                if (isAdmin) renderAdminPanels();
+            } catch (err) {
+                alert('Connection error: ' + err.message);
+            }
+        });
+
+        // Tab switching
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.dataset.tab;
+                tabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+                document.getElementById(tabName + 'Tab').classList.remove('hidden');
+                if (tabName === 'admin' && isAdmin) renderAdminPanels();
+            });
+        });
+
+        // ============ FEED FUNCTIONS ============
+        function renderFeed() {
+            const postsList = document.getElementById('postsList');
+            postsList.innerHTML = posts.map(post => `
+                <div class="card" data-post-id="${post.id}">
+                    <div><strong>${post.username || post.author}</strong></div>
+                    <p>${post.content}</p>
+                    ${post.imageUrl ? `<img src="${post.imageUrl}" style="max-width:100%; max-height:200px;">` : ''}
+                    <div class="post-actions">
+                        <button class="like-btn" data-id="${post.id}">❤️ ${post.likes ? post.likes.length : 0}</button>
+                        <button class="comment-toggle" data-id="${post.id}">💬 Comments</button>
+                        <button class="tip-btn" data-recipient="${post.author}">💸 Tip</button>
+                        <button class="share-btn share-button" data-title="Check out this post!" data-text="${post.content.substring(0,50)}" data-url="https://yourapp.com/posts/${post.id}">🔗 Share</button>
+                    </div>
+                    <div class="comments-section hidden" id="comments-${post.id}">
+                        ${(post.comments || []).map(c => `
+                            <div class="comment">
+                                <strong>${c.username || c.userWallet}</strong>: ${c.content}
+                            </div>
+                        `).join('')}
+                        <div style="margin-top:10px;">
+                            <input type="text" placeholder="Add comment..." id="comment-input-${post.id}">
+                            <button class="add-comment" data-id="${post.id}">Post</button>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+
+            // Attach event listeners
+            document.querySelectorAll('.like-btn').forEach(btn => {
+                btn.addEventListener('click', () => likePost(btn.dataset.id));
+            });
+            document.querySelectorAll('.comment-toggle').forEach(btn => {
+                btn.addEventListener('click', () => toggleComments(btn.dataset.id));
+            });
+            document.querySelectorAll('.add-comment').forEach(btn => {
+                btn.addEventListener('click', () => addComment(btn.dataset.id));
+            });
+            document.querySelectorAll('.tip-btn').forEach(btn => {
+                btn.addEventListener('click', () => sendTip(btn.dataset.recipient));
+            });
+            document.querySelectorAll('.share-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => shareContent(e.target.dataset));
+            });
+        }
+
+        function likePost(postId) {
+            if (!userAddress) return alert('Connect wallet first');
+            const post = posts.find(p => p.id == postId);
+            if (!post) return;
+            if (!post.likes) post.likes = [];
+            const index = post.likes.indexOf(userAddress);
+            if (index === -1) post.likes.push(userAddress);
+            else post.likes.splice(index, 1);
+            saveData();
+            renderFeed();
+        }
+
+        function toggleComments(postId) {
+            const section = document.getElementById('comments-' + postId);
+            section.classList.toggle('hidden');
+        }
+
+        function addComment(postId) {
+            if (!userAddress) return alert('Connect wallet first');
+            const input = document.getElementById('comment-input-' + postId);
+            const text = input.value.trim();
+            if (!text) return;
+            const post = posts.find(p => p.id == postId);
+            if (!post) return;
+            if (!post.comments) post.comments = [];
+            post.comments.push({
+                userWallet: userAddress,
+                username: 'User', // you could store username from user profile
+                content: text,
+                timestamp: Date.now()
+            });
+            saveData();
+            renderFeed();
+        }
+
+        document.getElementById('createPostBtn').addEventListener('click', () => {
+            if (!userAddress) return alert('Connect wallet first');
+            const content = document.getElementById('postContent').value.trim();
+            if (!content) return alert('Post content cannot be empty');
+            const imageUrl = document.getElementById('postImage').value.trim();
+            posts.push({
+                id: Date.now(),
+                author: userAddress,
+                username: 'User', // you can later add profile system
+                content,
+                imageUrl,
+                likes: [],
+                comments: [],
+                timestamp: Date.now()
+            });
+            saveData();
+            document.getElementById('postContent').value = '';
+            document.getElementById('postImage').value = '';
+            renderFeed();
+        });
+
+        // ============ CAMPAIGN FUNCTIONS ============
+        function renderCampaigns() {
+            const campaignsList = document.getElementById('campaignsList');
+            campaignsList.innerHTML = campaigns.map(camp => `
+                <div class="card">
+                    <h4>${camp.title}</h4>
+                    <p>${camp.description}</p>
+                    <p><strong>Goal:</strong> ${camp.goal} FUND</p>
+                    <p><strong>Raised:</strong> ${camp.raised || 0} FUND</p>
+                    <div class="progress">
+                        <div class="progress-bar" style="width:${Math.min(100, (camp.raised || 0)/camp.goal*100)}%"></div>
+                    </div>
+                    <p><strong>Deadline:</strong> ${camp.deadline}</p>
+                    <div class="post-actions">
+                        <button class="donate-btn" data-creator="${camp.creator}" data-id="${camp.id}">💰 Donate</button>
+                        <button class="share-btn share-button" data-title="Support this campaign!" data-text="${camp.title}" data-url="https://yourapp.com/campaigns/${camp.id}">🔗 Share</button>
+                    </div>
+                </div>
+            `).join('');
+
+            document.querySelectorAll('.donate-btn').forEach(btn => {
+                btn.addEventListener('click', () => donate(btn.dataset.creator, btn.dataset.id));
+            });
+            document.querySelectorAll('.share-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => shareContent(e.target.dataset));
+            });
+        }
+
+        document.getElementById('createCampaignBtn').addEventListener('click', () => {
+            if (!userAddress) return alert('Connect wallet first');
+            const title = document.getElementById('campaignTitle').value.trim();
+            const desc = document.getElementById('campaignDescription').value.trim();
+            const goal = parseFloat(document.getElementById('campaignGoal').value);
+            const deadline = document.getElementById('campaignDeadline').value;
+            if (!title || !desc || !goal || !deadline) return alert('Fill all fields');
+            campaigns.push({
+                id: Date.now(),
+                creator: userAddress,
+                title,
+                description: desc,
+                goal,
+                raised: 0,
+                deadline,
+                status: 'active',
+                timestamp: Date.now()
+            });
+            saveData();
+            document.getElementById('campaignTitle').value = '';
+            document.getElementById('campaignDescription').value = '';
+            document.getElementById('campaignGoal').value = '';
+            document.getElementById('campaignDeadline').value = '';
+            renderCampaigns();
+        });
+
+        async function donate(creator, campaignId) {
+            if (!userAddress) return alert('Connect wallet first');
+            const amount = prompt('Enter amount to donate (FUND):');
+            if (!amount || isNaN(amount) || amount <= 0) return;
+            try {
+                const decimals = await fundContract.decimals();
+                const amountWei = ethers.utils.parseUnits(amount, decimals);
+                const tx = await fundContract.transfer(creator, amountWei);
+                alert(`Donation sent! Tx: ${tx.hash}`);
+                await tx.wait();
+                // Update campaign raised amount
+                const campaign = campaigns.find(c => c.id == campaignId);
+                if (campaign) {
+                    campaign.raised = (campaign.raised || 0) + parseFloat(amount);
+                    saveData();
+                    renderCampaigns();
+                }
+                alert('Transaction confirmed!');
+            } catch (err) {
+                alert('Donation failed: ' + err.message);
+            }
+        }
+
+        // ============ TIPPING (reused from earlier) ============
+        async function sendTip(recipient) {
+            if (!userAddress) return alert('Connect wallet first');
+            const amount = prompt('Enter amount to tip (FUND):');
+            if (!amount || isNaN(amount) || amount <= 0) return;
+            try {
+                const decimals = await fundContract.decimals();
+                const amountWei = ethers.utils.parseUnits(amount, decimals);
+                const tx = await fundContract.transfer(recipient, amountWei);
+                alert(`Tip sent! Tx: ${tx.hash}`);
+                await tx.wait();
+                alert('Transaction confirmed!');
+            } catch (err) {
+                alert('Tip failed: ' + err.message);
+            }
+        }
+
+        // ============ SHARING ============
+        function shareContent(data) {
+            const shareData = {
+                title: data.title || 'Social Funders Network',
+                text: data.text || '',
+                url: data.url || window.location.href,
+            };
+            if (navigator.share) {
+                navigator.share(shareData).catch(() => {
+                    copyToClipboard(shareData.url);
+                });
+            } else {
+                copyToClipboard(shareData.url);
+            }
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                alert('Link copied to clipboard!');
+            }).catch(() => {
+                alert('Could not copy link. Please copy manually: ' + text);
+            });
+        }
+
+        // ============ ADMIN FUNCTIONS ============
+        function renderAdminPanels() {
+            if (!isAdmin) return;
+            const adminPosts = document.getElementById('adminPostsList');
+            adminPosts.innerHTML = posts.map(post => `
+                <div class="card">
+                    <p><strong>${post.author}</strong>: ${post.content}</p>
+                    <button class="danger" data-action="deletePost" data-id="${post.id}">Delete Post</button>
+                </div>
+            `).join('');
+            document.querySelectorAll('[data-action="deletePost"]').forEach(btn => {
+                btn.addEventListener('click', () => deletePost(btn.dataset.id));
+            });
+
+            const adminCampaigns = document.getElementById('adminCampaignsList');
+            adminCampaigns.innerHTML = campaigns.map(camp => `
+                <div class="card">
+                    <h4>${camp.title}</h4>
+                    <p>By: ${camp.creator}</p>
+                    <button class="danger" data-action="deleteCampaign" data-id="${camp.id}">Delete Campaign</button>
+                </div>
+            `).join('');
+            document.querySelectorAll('[data-action="deleteCampaign"]').forEach(btn => {
+                btn.addEventListener('click', () => deleteCampaign(btn.dataset.id));
+            });
+        }
+
+        function deletePost(postId) {
+            if (!isAdmin) return;
+            posts = posts.filter(p => p.id != postId);
+            saveData();
+            renderFeed();
+            if (isAdmin) renderAdminPanels();
+        }
+
+        function deleteCampaign(campaignId) {
+            if (!isAdmin) return;
+            campaigns = campaigns.filter(c => c.id != campaignId);
+            saveData();
+            renderCampaigns();
+            if (isAdmin) renderAdminPanels();
+        }
+    </script>
+</body>
+</html>
